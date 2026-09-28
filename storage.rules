@@ -1,0 +1,217 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDocPath(uid) {
+      return /databases/(default)/documents/users/$(uid);
+    }
+
+    function userDocExists() {
+      return signedIn() && firestore.exists(userDocPath(request.auth.uid));
+    }
+
+    function currentUser() {
+      return firestore.get(userDocPath(request.auth.uid));
+    }
+
+    function currentUserGroupIds() {
+      return userDocExists() &&
+        'groupIds' in currentUser().data &&
+        currentUser().data.groupIds is list
+          ? currentUser().data.groupIds
+          : [];
+    }
+
+    function userRole() {
+      return userDocExists() ? currentUser().data.role : 'user';
+    }
+
+    function isActiveAccount() {
+      return userDocExists() &&
+        (
+          !('accountStatus' in currentUser().data) ||
+          currentUser().data.accountStatus == 'active'
+        );
+    }
+
+    function hasAnyRole(roles) {
+      return userDocExists() && userRole() in roles;
+    }
+
+    function isAdmin0() {
+      return hasAnyRole(['admin0']);
+    }
+
+    function groupPath(groupId) {
+      return /databases/(default)/documents/groups/$(groupId);
+    }
+
+    function groupDocExists(groupId) {
+      return firestore.exists(groupPath(groupId));
+    }
+
+    function groupDoc(groupId) {
+      return firestore.get(groupPath(groupId));
+    }
+
+    function isGroupMember(groupId) {
+      // Storage Rules may access at most two distinct Firestore documents.
+      // Backend membership flows mirror membership into users/{uid}.groupIds,
+      // so this check reads only the user and group documents.
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        groupId in currentUserGroupIds();
+    }
+
+    function isGroupCreator(groupId) {
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        (
+          groupDoc(groupId).data.adminId == request.auth.uid ||
+          (
+            'adminIds' in groupDoc(groupId).data &&
+            request.auth.uid in groupDoc(groupId).data.adminIds
+          )
+        );
+    }
+
+    function canManageGroup(groupId) {
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        (
+          isAdmin0() ||
+          (
+            hasAnyRole(['admin1']) &&
+            currentUser().data.department == groupDoc(groupId).data.department
+          ) ||
+          isGroupCreator(groupId)
+        );
+    }
+
+    function isSmallEnough(maxMb) {
+      return request.resource != null &&
+        request.resource.size <= maxMb * 1024 * 1024;
+    }
+
+    function isAllowedImage() {
+      return request.resource.contentType in [
+        'image/jpeg',
+        'image/png',
+        'image/webp'
+      ];
+    }
+
+    function isAllowedVideo() {
+      return request.resource.contentType in [
+        'video/mp4',
+        'video/quicktime',
+        'video/x-m4v',
+        'video/webm'
+      ];
+    }
+
+    function isAllowedAudio() {
+      return request.resource.contentType in [
+        'audio/aac',
+        'audio/mp4',
+        'audio/mpeg',
+        'audio/ogg',
+        'audio/wav',
+        'audio/x-m4a'
+      ];
+    }
+
+    function isAllowedFile() {
+      return request.resource.contentType in [
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'text/plain'
+      ];
+    }
+
+    match /chat_images/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId);
+
+      allow create: if isGroupMember(groupId) &&
+        isSmallEnough(8) &&
+        isAllowedImage();
+
+      allow update, delete: if false;
+    }
+
+    match /chat_videos/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId);
+
+      allow create: if isGroupMember(groupId) &&
+        isSmallEnough(60) &&
+        isAllowedVideo();
+
+      allow update, delete: if false;
+    }
+
+    match /chat_video_thumbnails/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId);
+
+      allow create: if isGroupMember(groupId) &&
+        isSmallEnough(2) &&
+        isAllowedImage();
+
+      allow update, delete: if false;
+    }
+
+    match /chat_audio/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId);
+
+      allow create: if isGroupMember(groupId) &&
+        isSmallEnough(15) &&
+        isAllowedAudio();
+
+      allow update, delete: if false;
+    }
+
+    match /files/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId);
+
+      allow create: if isGroupMember(groupId) &&
+        isSmallEnough(20) &&
+        isAllowedFile();
+
+      allow update, delete: if false;
+    }
+
+    match /group_icons/{groupId}/{fileName} {
+      allow read: if isGroupMember(groupId) ||
+        (
+          isActiveAccount() &&
+          groupDocExists(groupId) &&
+          currentUser().data.department == groupDoc(groupId).data.department
+        );
+
+      allow create: if canManageGroup(groupId) &&
+        isSmallEnough(3) &&
+        isAllowedImage();
+
+      allow update, delete: if false;
+    }
+
+    match /profile_images/{uid}/{fileName} {
+      allow read: if isActiveAccount();
+
+      allow create: if isActiveAccount() &&
+        request.auth.uid == uid &&
+        isSmallEnough(3) &&
+        isAllowedImage();
+
+      allow update, delete: if false;
+    }
+  }
+}

@@ -1,0 +1,749 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDocPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function userDocExists() {
+      return signedIn() && exists(userDocPath(request.auth.uid));
+    }
+
+    function currentUser() {
+      return get(userDocPath(request.auth.uid));
+    }
+
+    function userRole() {
+      return userDocExists() ? currentUser().data.role : 'user';
+    }
+
+    function isActiveAccount() {
+      return userDocExists() &&
+        (
+          !('accountStatus' in currentUser().data) ||
+          currentUser().data.accountStatus == 'active'
+        );
+    }
+
+    function hasAnyRole(roles) {
+      return userDocExists() && userRole() in roles;
+    }
+
+    function isAdmin0() {
+      return hasAnyRole(['admin0']);
+    }
+
+    function currentUserGroupIds() {
+      return 'groupIds' in currentUser().data ? currentUser().data.groupIds : [];
+    }
+
+    function groupPath(groupId) {
+      return /databases/$(database)/documents/groups/$(groupId);
+    }
+
+    function groupDocExists(groupId) {
+      return exists(groupPath(groupId));
+    }
+
+    function groupDoc(groupId) {
+      return get(groupPath(groupId));
+    }
+
+    function groupMemberStatePath(groupId, uid) {
+      return /databases/$(database)/documents/groups/$(groupId)/memberStates/$(uid);
+    }
+
+    function isGroupMember(groupId) {
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        exists(groupMemberStatePath(groupId, request.auth.uid));
+    }
+
+    function isGroupCreator(groupId) {
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        (
+          groupDoc(groupId).data.adminId == request.auth.uid ||
+          (
+            'adminIds' in groupDoc(groupId).data &&
+            request.auth.uid in groupDoc(groupId).data.adminIds
+          )
+        );
+    }
+
+
+    function canViewGroupData(groupId, groupData) {
+      return isActiveAccount() &&
+        (
+          isGroupMember(groupId) ||
+          isAdmin0() ||
+          (
+            hasAnyRole(['admin1', 'admin2']) &&
+            currentUser().data.department == groupData.department
+          )
+        );
+    }
+
+    function canManageGroupData(groupData) {
+      return isActiveAccount() &&
+        (
+          isAdmin0() ||
+          (
+            hasAnyRole(['admin1']) &&
+            currentUser().data.department == groupData.department
+          ) ||
+          groupData.adminId == request.auth.uid ||
+          (
+            'adminIds' in groupData &&
+            request.auth.uid in groupData.adminIds
+          )
+        );
+    }
+
+    function canManageGroup(groupId) {
+      return isActiveAccount() &&
+        groupDocExists(groupId) &&
+        canManageGroupData(groupDoc(groupId).data);
+    }
+
+    function isMainGroupData(groupData) {
+      return 'groupName' in groupData &&
+        groupData.groupName is string &&
+        groupData.groupName.matches('^main_.*');
+    }
+
+    function isWorkerAccount() {
+      return userDocExists() &&
+        'accountType' in currentUser().data &&
+        currentUser().data.accountType == 'worker' &&
+        'department' in currentUser().data &&
+        currentUser().data.department == 'عامل';
+    }
+
+    function canWriteMainGroup(groupId, groupData) {
+      return isActiveAccount() &&
+        (
+          (groupData.groupName == 'main_wpu' && isAdmin0()) ||
+          (
+            groupData.groupName == 'main_worker' &&
+            isWorkerAccount() &&
+            isGroupMember(groupId)
+          ) ||
+          (
+            groupData.groupName != 'main_wpu' &&
+            (
+              isAdmin0() ||
+              (
+                hasAnyRole(['admin1', 'admin2']) &&
+                currentUser().data.department == groupData.department
+              )
+            )
+          )
+        );
+    }
+
+    function optionalString(value, maxSize) {
+      return value == null || (value is string && value.size() <= maxSize);
+    }
+
+    function validProfilePic(value, uid) {
+      return value == null ||
+        (
+          value is string &&
+          value.size() <= 2048 &&
+          (
+            value == '' ||
+            value.matches('^profile_images/' + uid + '/[^/]+$')
+          )
+        );
+    }
+
+    function validGroupSettingsWrite(userId, groupId) {
+      return isActiveAccount() &&
+        request.auth.uid == userId &&
+        isGroupMember(groupId) &&
+        request.resource.data.keys().hasOnly([
+          'groupId',
+          'muted',
+          'mutedUntil',
+          'pinned',
+          'updatedAt'
+        ]) &&
+        (
+          !('groupId' in request.resource.data) ||
+          request.resource.data.groupId == groupId
+        ) &&
+        (
+          !('muted' in request.resource.data) ||
+          request.resource.data.muted is bool
+        ) &&
+        (
+          !('pinned' in request.resource.data) ||
+          request.resource.data.pinned is bool
+        ) &&
+        (
+          !('mutedUntil' in request.resource.data) ||
+          request.resource.data.mutedUntil == null ||
+          request.resource.data.mutedUntil is timestamp
+        ) &&
+        (
+          !('updatedAt' in request.resource.data) ||
+          request.resource.data.updatedAt is timestamp
+        );
+    }
+
+    
+
+    function eventVisible(eventData) {
+      return isActiveAccount() &&
+        (
+          (
+            'visibilityKeys' in eventData &&
+            eventData.visibilityKeys is list &&
+            'all' in eventData.visibilityKeys
+          ) ||
+          eventData.scopeType in ['university', 'all'] ||
+          (
+            (
+              eventData.scopeType == 'department' ||
+              (
+                'visibilityKeys' in eventData &&
+                eventData.visibilityKeys is list &&
+                ('dept:' + currentUser().data.department) in eventData.visibilityKeys
+              )
+            ) &&
+            (
+              eventData.department == currentUser().data.department ||
+              eventData.targetDepartment == currentUser().data.department
+            )
+          ) ||
+          (
+            eventData.scopeType == 'group' &&
+            eventData.targetGroupId in currentUserGroupIds()
+          )
+        );
+    }
+
+    function messagePath(groupId, messageId) {
+      return /databases/$(database)/documents/groups/$(groupId)/messages/$(messageId);
+    }
+
+    function messageDocExists(groupId, messageId) {
+      return exists(messagePath(groupId, messageId));
+    }
+
+    function messageDoc(groupId, messageId) {
+      return get(messagePath(groupId, messageId));
+    }
+
+    function validTextMessage() {
+      return request.resource.data.message is string &&
+        request.resource.data.message.size() > 0 &&
+        request.resource.data.message.size() <= 4000;
+    }
+
+    function validStoragePathForGroup(groupId, value, root, maxSize) {
+      return value is string &&
+        value.size() > 0 &&
+        value.size() <= maxSize &&
+        value.matches('^' + root + '/' + groupId + '/[^/]+$');
+    }
+
+    function validMessageStoragePath(groupId, root, maxSize) {
+      return validStoragePathForGroup(
+        groupId,
+        request.resource.data.storagePath,
+        root,
+        maxSize
+      );
+    }
+
+    function validOptionalVideoThumbnailPath(groupId) {
+      return !('videoThumbnailPath' in request.resource.data) ||
+        validStoragePathForGroup(
+          groupId,
+          request.resource.data.videoThumbnailPath,
+          'chat_video_thumbnails',
+          180
+        );
+    }
+
+  
+
+   
+
+    function validClientMessageTime() {
+      return request.resource.data.time is int &&
+        request.resource.data.time >= request.time.toMillis() - (60 * 1000) &&
+        request.resource.data.time <= request.time.toMillis() + (60 * 1000);
+    }
+
+function validOptionalFileName() {
+  return !('fileName' in request.resource.data) ||
+    (
+      request.resource.data.fileName is string &&
+      request.resource.data.fileName.size() > 0 &&
+      request.resource.data.fileName.size() <= 120
+    );
+}
+
+function validOptionalAudioDuration() {
+  return !('audioDurationMs' in request.resource.data) ||
+    (
+      request.resource.data.audioDurationMs is int &&
+      request.resource.data.audioDurationMs >= 0 &&
+      request.resource.data.audioDurationMs <= 3600000
+    );
+}
+
+function validOptionalReplyFields() {
+  return (
+      !('replyToMessageId' in request.resource.data) &&
+      !('replyToText' in request.resource.data) &&
+      !('replyToSender' in request.resource.data) &&
+      !('replyToType' in request.resource.data)
+    ) ||
+    (
+      request.resource.data.replyToMessageId is string &&
+      request.resource.data.replyToMessageId.size() > 0 &&
+      request.resource.data.replyToMessageId.size() <= 140 &&
+      request.resource.data.replyToText is string &&
+      request.resource.data.replyToText.size() > 0 &&
+      request.resource.data.replyToText.size() <= 220 &&
+      request.resource.data.replyToSender is string &&
+      request.resource.data.replyToSender.size() > 0 &&
+      request.resource.data.replyToSender.size() <= 120 &&
+      request.resource.data.replyToType is string &&
+      request.resource.data.replyToType.size() > 0 &&
+      request.resource.data.replyToType.size() <= 30
+    );
+}
+
+function validPollOption(option) {
+  return option is string &&
+    option.size() > 0 &&
+    option.size() <= 80;
+}
+
+function validPollOptions() {
+  return request.resource.data.pollOptions is list &&
+    request.resource.data.pollOptions.size() >= 2 &&
+    request.resource.data.pollOptions.size() <= 6 &&
+    validPollOption(request.resource.data.pollOptions[0]) &&
+    validPollOption(request.resource.data.pollOptions[1]) &&
+    (
+      request.resource.data.pollOptions.size() < 3 ||
+      validPollOption(request.resource.data.pollOptions[2])
+    ) &&
+    (
+      request.resource.data.pollOptions.size() < 4 ||
+      validPollOption(request.resource.data.pollOptions[3])
+    ) &&
+    (
+      request.resource.data.pollOptions.size() < 5 ||
+      validPollOption(request.resource.data.pollOptions[4])
+    ) &&
+    (
+      request.resource.data.pollOptions.size() < 6 ||
+      validPollOption(request.resource.data.pollOptions[5])
+    );
+}
+
+function validPollExpiresAt() {
+  return request.resource.data.pollExpiresAt is int &&
+    request.resource.data.pollExpiresAt >= request.time.toMillis() + (60 * 1000) &&
+    request.resource.data.pollExpiresAt <= request.time.toMillis() + (30 * 24 * 60 * 60 * 1000);
+}
+
+function validNewMessage(groupId) {
+  return request.resource.data.senderId == request.auth.uid &&
+    request.resource.data.sender == currentUser().data.fullName &&
+    validClientMessageTime() &&
+    request.resource.data.createdAt == request.time &&
+    groupDoc(groupId).data.isActive == true &&
+    request.resource.data.type in ['text', 'image', 'video', 'audio', 'file', 'poll'] &&
+    (
+      (
+        request.resource.data.type == 'text' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validTextMessage() &&
+        validOptionalReplyFields()
+      ) ||
+      (
+        request.resource.data.type == 'image' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'storagePath',
+          'fileName',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validTextMessage() &&
+        validOptionalReplyFields() &&
+        validOptionalFileName() &&
+        validMessageStoragePath(groupId, 'chat_images', 180)
+      ) ||
+      (
+        request.resource.data.type == 'video' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'storagePath',
+          'videoThumbnailPath',
+          'fileName',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validTextMessage() &&
+        validOptionalReplyFields() &&
+        validOptionalFileName() &&
+        validMessageStoragePath(groupId, 'chat_videos', 180) &&
+        validOptionalVideoThumbnailPath(groupId)
+      ) ||
+      (
+        request.resource.data.type == 'audio' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'storagePath',
+          'fileName',
+          'audioDurationMs',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validTextMessage() &&
+        validOptionalReplyFields() &&
+        validOptionalFileName() &&
+        validOptionalAudioDuration() &&
+        validMessageStoragePath(groupId, 'chat_audio', 180)
+      ) ||
+      (
+        request.resource.data.type == 'file' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'storagePath',
+          'fileName',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validTextMessage() &&
+        validOptionalReplyFields() &&
+        'fileName' in request.resource.data &&
+        validOptionalFileName() &&
+        validMessageStoragePath(groupId, 'files', 180)
+      ) ||
+      (
+        request.resource.data.type == 'poll' &&
+        request.resource.data.keys().hasOnly([
+          'sender',
+          'senderId',
+          'time',
+          'createdAt',
+          'type',
+          'message',
+          'pollQuestion',
+          'pollOptions',
+          'pollExpiresAt',
+          'pollIsClosed',
+          'pollTotalVotes',
+          'replyToMessageId',
+          'replyToText',
+          'replyToSender',
+          'replyToType'
+        ]) &&
+        validOptionalReplyFields() &&
+        request.resource.data.message is string &&
+        request.resource.data.message.size() > 0 &&
+        request.resource.data.message.size() <= 120 &&
+        request.resource.data.pollQuestion is string &&
+        request.resource.data.pollQuestion.size() > 0 &&
+        request.resource.data.pollQuestion.size() <= 120 &&
+        validPollOptions() &&
+        validPollExpiresAt() &&
+        request.resource.data.pollIsClosed == false &&
+        request.resource.data.pollTotalVotes == 0
+      )
+    );
+}
+
+    function pollIsOpenAndNotExpired(groupId, messageId) {
+      return messageDocExists(groupId, messageId) &&
+        messageDoc(groupId, messageId).data.type == 'poll' &&
+        messageDoc(groupId, messageId).data.pollIsClosed != true &&
+        request.time.toMillis() < messageDoc(groupId, messageId).data.pollExpiresAt;
+    }
+
+    function canReadUserDoc(userId) {
+  return signedIn() &&
+    request.auth.uid == userId;
+}
+
+    match /dashboardAuditLogs/{logId} {
+      allow read, write: if false;
+    }
+
+    match /notificationCampaigns/{campaignId} {
+      allow read, write: if false;
+    }
+
+    match /bulkImports/{jobId} {
+      allow read: if isActiveAccount() &&
+        isAdmin0() &&
+        resource.data.createdBy == request.auth.uid;
+
+      allow create, update, delete: if false;
+
+      match /chunks/{chunkId} {
+        allow read: if isActiveAccount() &&
+          isAdmin0() &&
+          get(/databases/$(database)/documents/bulkImports/$(jobId)).data.createdBy == request.auth.uid;
+
+        allow create, update, delete: if false;
+      }
+    }
+
+    match /groups/{groupId} {
+      allow read: if canViewGroupData(groupId, resource.data);
+
+      allow create: if false;
+
+      allow update: if false;
+
+      allow delete: if false;
+
+      match /memberStates/{uid} {
+        allow read: if groupDocExists(groupId) && canViewGroupData(groupId, groupDoc(groupId).data);
+
+allow create, update: if false;
+        allow delete: if false;
+      }
+
+      match /messages/{messageId} {
+        allow read: if groupDocExists(groupId) && canViewGroupData(groupId, groupDoc(groupId).data);
+
+        allow create: if isActiveAccount() &&
+          (
+            isGroupMember(groupId) ||
+            (
+              groupDocExists(groupId) &&
+              isMainGroupData(groupDoc(groupId).data) &&
+              canWriteMainGroup(groupId, groupDoc(groupId).data)
+            )
+          ) &&
+          validNewMessage(groupId) &&
+          (
+            (
+              isMainGroupData(groupDoc(groupId).data) &&
+              canWriteMainGroup(groupId, groupDoc(groupId).data)
+            ) ||
+            (
+              !isMainGroupData(groupDoc(groupId).data) &&
+              groupDoc(groupId).data.writePermission == 'all'
+            ) ||
+            (
+              !isMainGroupData(groupDoc(groupId).data) &&
+              groupDoc(groupId).data.writePermission == 'admins' &&
+              canManageGroup(groupId)
+            )
+          );
+
+        allow update, delete: if false;
+
+        match /votes/{voteId} {
+          allow read: if isActiveAccount() &&
+            isGroupMember(groupId);
+
+          allow create, update: if isActiveAccount() &&
+            isGroupMember(groupId) &&
+            pollIsOpenAndNotExpired(groupId, messageId) &&
+            voteId == request.auth.uid &&
+            request.resource.data.keys().hasOnly([
+              'uid',
+              'optionIndex',
+              'votedAt'
+            ]) &&
+            request.resource.data.uid == request.auth.uid &&
+            request.resource.data.optionIndex is int &&
+            request.resource.data.optionIndex >= 0 &&
+            request.resource.data.optionIndex < messageDoc(groupId, messageId).data.pollOptions.size() &&
+            request.resource.data.votedAt == request.time;
+
+          allow delete: if isActiveAccount() &&
+            isGroupMember(groupId) &&
+            pollIsOpenAndNotExpired(groupId, messageId) &&
+            voteId == request.auth.uid;
+        }
+      }
+    }
+
+    match /eventFeeds/university/events/{eventId} {
+      allow read: if isActiveAccount();
+      allow create, update, delete: if false;
+    }
+
+    match /eventFeeds/departments/{department}/feed/events/{eventId} {
+      allow read: if isActiveAccount() &&
+        currentUser().data.department == department;
+
+      allow create, update, delete: if false;
+    }
+
+    match /eventFeeds/groups/{groupId}/feed/events/{eventId} {
+      allow read: if isActiveAccount() &&
+        groupId in currentUserGroupIds();
+
+      allow create, update, delete: if false;
+    }
+
+    match /events/{eventId} {
+      allow read: if eventVisible(resource.data);
+
+      allow create, update, delete: if false;
+
+      match /interestedUsers/{uid} {
+        allow read, create, update, delete: if false;
+      }
+    }
+
+    match /users/{userId} {
+      match /eventInterests/{eventId} {
+        allow read: if isActiveAccount() &&
+          request.auth.uid == userId;
+
+        allow create, update, delete: if false;
+      }
+
+      match /unreadGroups/{groupId} {
+        allow read, delete: if isActiveAccount() &&
+          request.auth.uid == userId;
+
+        allow create, update: if false;
+      }
+
+      match /groupSummaries/{groupId} {
+        allow read: if isActiveAccount() &&
+          request.auth.uid == userId;
+
+        allow create, update, delete: if false;
+      }
+
+      match /savedMessages/{savedMessageId} {
+        allow read, delete: if isActiveAccount() &&
+          request.auth.uid == userId;
+
+        allow create, update: if isActiveAccount() &&
+          request.auth.uid == userId &&
+          request.resource.data.keys().hasOnly([
+            'id',
+            'uid',
+            'groupId',
+            'groupName',
+            'messageId',
+            'message',
+            'type',
+            'sender',
+            'senderId',
+            'time',
+            'fileName',
+            'savedAt'
+          ]) &&
+          request.resource.data.uid == userId &&
+          request.resource.data.id is string &&
+          request.resource.data.id == savedMessageId &&
+          request.resource.data.groupId is string &&
+          request.resource.data.groupId.size() > 0 &&
+          request.resource.data.groupId.size() <= 140 &&
+          isGroupMember(request.resource.data.groupId) &&
+          request.resource.data.messageId is string &&
+          request.resource.data.messageId.size() > 0 &&
+          request.resource.data.messageId.size() <= 140 &&
+          exists(/databases/$(database)/documents/groups/$(request.resource.data.groupId)/messages/$(request.resource.data.messageId)) &&
+          request.resource.data.message is string &&
+          request.resource.data.message.size() <= 4000 &&
+          request.resource.data.type is string &&
+          request.resource.data.type.size() <= 30 &&
+          request.resource.data.sender is string &&
+          request.resource.data.sender.size() <= 120 &&
+          request.resource.data.senderId is string &&
+          request.resource.data.senderId.size() <= 140 &&
+          request.resource.data.time is int &&
+          request.resource.data.savedAt == request.time &&
+          (!('groupName' in request.resource.data) || (request.resource.data.groupName is string && request.resource.data.groupName.size() <= 120)) &&
+          (!('fileName' in request.resource.data) || (request.resource.data.fileName is string && request.resource.data.fileName.size() <= 180));
+      }
+
+      match /groupSettings/{groupId} {
+        allow read: if isActiveAccount() &&
+          request.auth.uid == userId;
+
+        allow create, update: if validGroupSettingsWrite(userId, groupId);
+
+        allow delete: if isActiveAccount() &&
+          request.auth.uid == userId;
+      }
+
+      allow read: if canReadUserDoc(userId);
+      allow create: if false;
+
+      allow update: if isActiveAccount() &&
+        request.auth.uid == userId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'phone',
+          'profilepic'
+        ]) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.accountType == resource.data.accountType &&
+        request.resource.data.department == resource.data.department &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.email == resource.data.email &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.fullName == resource.data.fullName &&
+        (!('phone' in request.resource.data) || optionalString(request.resource.data.phone, 25)) &&
+        (!('profilepic' in request.resource.data) || validProfilePic(request.resource.data.profilepic, userId));
+
+      allow delete: if false;
+    }
+  }
+}

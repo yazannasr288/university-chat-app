@@ -1,0 +1,6 @@
+export const MAX_BULK_IMPORT_STUDENTS = 1500;
+export const BULK_IMPORT_CHUNK_SIZE = 100;
+export const USER_DOC_FETCH_CHUNK_SIZE = 200;
+export const FCM_BATCH_SIZE = 400;
+
+export const UNREAD_COUNTER_FANOUT_LIMIT = 150;
